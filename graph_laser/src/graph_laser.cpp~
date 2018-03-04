@@ -1,0 +1,465 @@
+﻿#include "graph_laser/graph_laser.hpp"
+
+#include <stdlib.h>
+
+#include "graph_laser/common.hpp"
+#include <ros/ros.h>
+#include <tf_conversions/tf_eigen.h>
+#include <tf/transform_listener.h>
+
+using namespace laser_slam;
+using namespace graph_laser;
+
+float CORRECT_LOOP_POSE_TOLERANCE = 10;   // 8
+float SPACE_DISTANCE_TOLERANCE = 5;   // 4m
+int MINIMAL_TIME_OF_LOOP = 20;           // 20s
+int VELODYNE_FPS = 10;
+int minDuration=200;
+int minLast=200;
+int last_loop_id=0;
+pcl::PointCloud<pcl::VFHSignature308>::Ptr features(new pcl::PointCloud<pcl::VFHSignature308>());
+
+graphLaser::graphLaser(ros::NodeHandle& n) : nh_(n)
+{
+  //获取ros的参数
+  getParameters();
+
+  //创建增量优化器
+  std::shared_ptr<IncrementalEstimator> incremental_estimator(
+      new IncrementalEstimator(params_.online_estimator_params));
+
+  //std::move 将一个左值强制转化为右值引用
+  incremental_estimator_ = std::move(incremental_estimator);
+
+  //设置laserSlam
+  std::unique_ptr<LaserSlamWorker> laser_slam_worker(new LaserSlamWorker());
+
+  //初始化laser_slam
+  laser_slam_worker->init(nh_, laser_slam_worker_params_, incremental_estimator_);
+  laser_slam_worker_ = std::move(laser_slam_worker);
+
+  //创建一个保存地图的服务
+  save_map_ = nh_.advertiseService("save_map", &graphLaser::saveMapServiceCall, this);
+
+  loop_succed=false;
+}
+
+graphLaser::~graphLaser() {}
+
+/*
+ * 发布建图线程
+ */
+void graphLaser::publishMapThread()
+{
+  //是否发布地图
+  if (laser_slam_worker_params_.create_filtered_map)
+  {
+    ros::Rate thread_rate(laser_slam_worker_params_.map_publication_rate_hz);
+    while (ros::ok())
+    {
+      //发布地图
+      laser_slam_worker_->publishMap();
+      thread_rate.sleep();
+    }
+  }
+}
+
+/*
+ * 发布tf线程
+ */
+void graphLaser::publishTfThread()
+{
+  //是否发布世界坐标系到里程计坐标系的变换
+  if (params_.publish_world_to_odom)
+  {
+    //发布频率
+    ros::Rate thread_rate(params_.tf_publication_rate_hz);
+    while (ros::ok())
+    {
+      //从laser_slam_worker获取世界坐标系到里程计的变换
+      //发布坐标
+      tf::StampedTransform world_to_odom = laser_slam_worker_->getWorldToOdom();
+      world_to_odom.stamp_ = ros::Time::now();
+      tf_broadcaster_.sendTransform(world_to_odom);
+      thread_rate.sleep();
+    }
+  }
+}
+
+/**
+ * @brief downsample
+ * @param cloud
+ * @param downsampled
+ * @param factor
+ *
+ * 降采样
+ */
+void graphLaser::downsample(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+                const pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled,
+                int factor)
+{
+  for(int i = 0; i < cloud->size(); i++)
+  {
+    if(i % factor == 0)
+    {
+      downsampled->push_back(cloud->at(i));
+    }
+  }
+}
+
+/**
+ * @brief getVFHistigram
+ * @param cloud
+ * @return
+ *
+ * 获取VFH特征
+ */
+pcl::VFHSignature308 graphLaser::getVFHistigram(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
+{
+  pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+  downsample(cloud, downsampled_cloud, 4);
+
+  pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
+  ne.setInputCloud (downsampled_cloud);
+  pcl::search::KdTree<pcl::PointXYZ>::Ptr tree_normals (new pcl::search::KdTree<pcl::PointXYZ> ());
+  ne.setSearchMethod (tree_normals);
+  pcl::PointCloud<pcl::Normal>::Ptr cloud_normals (new pcl::PointCloud<pcl::Normal>);
+  ne.setRadiusSearch (0.2);
+  ne.compute (*cloud_normals);
+
+  pcl::search::KdTree<pcl::PointXYZ>::Ptr tree_vfh(new pcl::search::KdTree<pcl::PointXYZ>());
+  pcl::VFHEstimation<pcl::PointXYZ, pcl::Normal, pcl::VFHSignature308> vfh;
+  vfh.setInputCloud(downsampled_cloud);
+  vfh.setInputNormals(cloud_normals);
+  vfh.setSearchMethod(tree_vfh);
+
+  pcl::PointCloud<pcl::VFHSignature308>::Ptr vfhs(new pcl::PointCloud<pcl::VFHSignature308>());
+  vfh.compute(*vfhs);
+
+  return vfhs->front();
+}
+
+
+void graphLaser::findMatchbyInd(const pcl::PointCloud<pcl::VFHSignature308>::Ptr &featuresDataBase,const int ind,cv::Mat &result)
+{
+    cv::Mat distances(1, featuresDataBase->size(), CV_32F);
+    cv::Mat row_hist(1, 308, CV_32FC1, &(featuresDataBase->at(ind).histogram));
+    for(int col = 0; col < featuresDataBase->size(); col++)
+    {
+        cv::Mat col_hist(1, 308, CV_32FC1, &(featuresDataBase->at(col).histogram));
+
+        float distance;
+        if(abs(ind - col) < MINIMAL_TIME_OF_LOOP*VELODYNE_FPS*kloopDetetThreadRate_hz/10)
+        {
+          distance = INFINITY;
+        }
+        else
+        {
+          distance = cv::compareHist(row_hist, col_hist, CV_COMP_CHISQR);
+        }
+        distances.at<float>(0, col) = distance;
+    }
+    distances.copyTo(result);
+}
+
+std::vector<cv::DMatch> graphLaser::findMatch(const pcl::PointCloud<pcl::VFHSignature308>::Ptr &featuresDataBase,const int ind)
+{
+    cv::Mat distances1,distances2;
+    findMatchbyInd(featuresDataBase,ind,distances1);
+    double min_distance = INFINITY;
+    cv::Point min_position;
+    //逐步找当前帧，与当前帧最匹配的一帧
+    cv::minMaxLoc(distances1.row(0), &min_distance, NULL, &min_position, NULL);
+
+    std::vector<cv::DMatch> matches;
+    //找到这一帧
+    if(min_position.x < 0 || min_position.x >= featuresDataBase->size())
+    {
+      return matches;
+    }
+
+    findMatchbyInd(featuresDataBase,min_position.x,distances2);
+
+    //找到对应匹配的这一帧，与这一帧最匹配的一帧corresp_min
+    cv::Point corresp_min;
+    double corresp_min_dist = INFINITY;
+    cv::minMaxLoc(distances2.row(0), &corresp_min_dist, NULL, &corresp_min, NULL);
+
+    //当corresp_min=当前帧且当前帧是在对应匹配帧之前的，则说明匹配上了
+    if((corresp_min.x == ind) && (ind > min_position.x))
+    {
+      matches.push_back(cv::DMatch(ind, min_position.x, MIN(min_distance, corresp_min_dist)));
+    }
+
+    return matches;
+}
+Eigen::Matrix3d getRotationByPoses(const laser_slam::SE3 &source_t, const laser_slam::SE3 &target_t)
+{
+    Eigen::Matrix3d source_r = Eigen::Matrix3d::Identity();
+    Eigen::Quaterniond source_q(source_t.getRotation().w(),source_t.getRotation().x(),source_t.getRotation().y(),source_t.getRotation().z());
+    source_r=source_q;
+
+    Eigen::Matrix3d target_r = Eigen::Matrix3d::Identity();
+    Eigen::Quaterniond target_q(target_t.getRotation().w(),target_t.getRotation().x(),target_t.getRotation().y(),target_t.getRotation().z());
+    target_r=target_q;
+
+    Eigen::Matrix3d target_r_inv = target_r.inverse();
+
+    return (target_r_inv*source_r).inverse();
+}
+
+void graphLaser::loopDetector()
+{
+    //发布频率
+    ros::Rate thread_rate(kloopDetetThreadRate_hz);
+    while(ros::ok())
+    {
+        if(!laser_slam_worker_->cloudData.empty()
+          && last_cloudData_size!=laser_slam_worker_->cloudData.size())
+        {
+            last_cloudData_size=laser_slam_worker_->cloudData.size();
+            std::map<laser_slam::Time, cloudFrame>::reverse_iterator it=laser_slam_worker_->cloudData.rbegin();
+            laser_slam::Time current_time=it->first;
+            PointICloud current_cloud=it->second.original_cloud;
+            laser_slam::SE3 current_pose=it->second.T_w_linkpose;
+
+//            PointCloud current_sub_cloud;
+//            laser_slam_worker_->getLocalMap(&current_sub_cloud);
+
+            features_pose.push_back(current_pose);
+            features_time.push_back(current_time);
+            int ind=features_pose.size()-1;
+
+//            pcl::PointCloud<pcl::PointXYZI>::Ptr current_cloud_ptr(new pcl::PointCloud<pcl::PointXYZ>(current_cloud));
+//            pcl::VFHSignature308 vfh = getVFHistigram(current_cloud_ptr);
+//            features->push_back(vfh);
+
+//            std::vector<cv::DMatch> matches,filter_matches;
+//            matches = findMatch(features,ind);
+//            if(matches.size()>0)
+//            {
+//                for(int i = 0; i < matches.size(); i++)
+//                {
+//                  pcl::PointXYZ current_position=positionFromPose(current_pose);
+//                  pcl::PointXYZ match_position=positionFromPose(features_pose[matches[i].trainIdx]);
+
+//                  pcl::PointXY current_position_xy;
+//                  pcl::PointXY match_position_xy;
+//                  current_position_xy.x=current_position.x;
+//                  current_position_xy.y=current_position.y;
+//                  match_position_xy.x=match_position.x;
+//                  match_position_xy.y=match_position.y;
+//                  float feat_distance = sqrt(matches[i].distance);
+//                  float space_distance = pcl::euclideanDistance(current_position, match_position);
+//                  float space_distance_xy = pcl::euclideanDistance(current_position_xy, match_position_xy);
+
+//                  std::cout << "matches: "<<matches[i].trainIdx << " " << matches[i].queryIdx << " "
+//                      << feat_distance << " " << space_distance_xy  <<std::endl;
+
+//                  if(feat_distance<CORRECT_LOOP_POSE_TOLERANCE && space_distance_xy<SPACE_DISTANCE_TOLERANCE)
+//                  {
+//                      std::cout << "matches correct: "<< matches[i].trainIdx << " " << matches[i].queryIdx << " "
+//                          << feat_distance << " " << space_distance_xy  <<std::endl;
+
+//                      filter_matches.push_back(matches[i]);
+//                  }
+//                }
+
+//                if(filter_matches.size()>0)
+//                {
+//                    int id=filter_matches[0].queryIdx;
+//                    int old_index=filter_matches[0].trainIdx;
+//                    if(abs(id-old_index)>(minDuration*kloopDetetThreadRate_hz/10) && abs(id-last_loop_id)>(minLast*kloopDetetThreadRate_hz/10))
+//                    {
+//                        std::cout<<"loop_succ "<<id<<" "<<old_index<<std::endl;
+//                        loop_succed=true;
+//                        last_loop_id=id;
+//                        loopRelativeclosure.time_a_ns=features_time[old_index];
+//                        loopRelativeclosure.time_b_ns=features_time[id];
+//                        loopRelativeclosure.track_id_a=loopRelativeclosure.track_id_b=0;
+
+//                        Eigen::Matrix<double, 3, 1> loopRelative_t;
+//                        loopRelative_t<<0,0,0;
+//                        //laser_slam::SE3 loopT(loopRelative_r,loopRelative_t);
+//                        laser_slam::SE3 a=features_pose[old_index];
+//                        laser_slam::SE3 b=features_pose[id];
+//                        Eigen::Matrix3d t_a_b=getRotationByPoses(a,b);
+//                        Eigen::Quaterniond q;
+//                        q=t_a_b;
+//                        laser_slam::SO3 loopRelative_r(q.w(),q.x(),q.y(),q.z());
+//                        laser_slam::SE3 loopT(loopRelative_r,loopRelative_t);
+//                        loopRelativeclosure.T_a_b=loopT;
+//                    }
+//                }
+//            }
+
+            Trajectory out_trajectory;
+            laser_slam_worker_->getTrajectory(&out_trajectory);
+            double min_xy=999999;
+            laser_slam::Time min_time;
+            laser_slam::SE3 min_pose;
+            for(auto& pose:out_trajectory)
+            {
+                double dist_xy=sqrt((current_pose.getPosition()(0)-pose.second.getPosition()(0))*(current_pose.getPosition()(0)-pose.second.getPosition()(0))+
+                                    (current_pose.getPosition()(1)-pose.second.getPosition()(1))*(current_pose.getPosition()(1)-pose.second.getPosition()(1)));
+
+                if(dist_xy!=0)
+                {
+                    if(dist_xy<min_xy && abs(current_time/1000000000.0-pose.first/1000000000.0)>20)
+                    {
+                        min_xy=dist_xy;
+                        min_pose=pose.second;
+                        min_time=pose.first;
+                    }
+                }
+            }
+            if(min_xy<3 && abs(ind-last_loop_id)>(minLast*kloopDetetThreadRate_hz/10))
+            {
+                    std::cout<<"loop_succ "<<current_time/1000000000.0<<" "<<min_time/1000000000.0<<" "<<min_xy<<std::endl;
+
+                    last_loop_id=ind;
+                    loopRelativeclosure.time_a_ns=min_time;
+                    loopRelativeclosure.time_b_ns=current_time;
+                    loopRelativeclosure.track_id_a=loopRelativeclosure.track_id_b=0;
+
+                    Eigen::Matrix<double, 3, 1> loopRelative_t;
+                    loopRelative_t<<0,0,0;
+                    //laser_slam::SE3 loopT(loopRelative_r,loopRelative_t);
+                    laser_slam::SE3 a=min_pose;
+                    laser_slam::SE3 b=current_pose;
+                    Eigen::Matrix3d t_a_b=getRotationByPoses(a,b);
+                    Eigen::Quaterniond q;
+                    q=t_a_b;
+                    laser_slam::SO3 loopRelative_r(q.w(),q.x(),q.y(),q.z());
+                    laser_slam::SE3 loopT(loopRelative_r,loopRelative_t);
+                    loopRelativeclosure.T_a_b=loopT;
+
+                    //loop_succed=true;
+            }
+        }
+        thread_rate.sleep();
+    }
+}
+/*
+ * 分割闭环线程
+ */
+void graphLaser::loopProcessThread()
+{
+    //分割闭环优化线程3Hz
+    ros::Rate thread_rate(kloopThreadRate_hz);
+    while (ros::ok())
+    {
+        if(loop_succed)
+        {
+            std::lock_guard<std::recursive_mutex> loopProcessCallback(loopProcess_mutex_);
+            //从incremental_estimator_获取当前位姿
+            Pose current_pose = incremental_estimator_->getCurrentPose();
+
+            //是闭环
+            LOG(INFO) << "Found loop closure! time_a_ns: " << loopRelativeclosure.time_a_ns <<
+                " time_b_ns: " << loopRelativeclosure.time_b_ns;
+
+            //用增量优化闭环
+            incremental_estimator_->processLoopClosure(loopRelativeclosure,true);
+
+            //是否清空局部地图，一般在闭环之后需要清空
+            if (params_.clear_local_map_after_loop_closure)
+            {
+              laser_slam_worker_->clearLocalMap();
+            }
+
+            //更新路径和分割物体
+            Trajectory trajectory;
+            laser_slam_worker_->getTrajectory(&trajectory);
+            laser_slam_worker_->updateFullMap();
+
+            loop_succed=false;
+        }
+        thread_rate.sleep();
+    }
+}
+
+/*
+ * 保存地图
+ */
+bool graphLaser::saveMapServiceCall(graph_laser::SaveMap::Request& request,
+                                     graph_laser::SaveMap::Response& response)
+{
+  PointCloud filtered_map;
+  Trajectory out_trajectory;
+  laser_slam_worker_->getFillMapFiltered(&filtered_map);
+  laser_slam_worker_->getTrajectory(&out_trajectory);
+  try
+  {
+    pcl::io::savePCDFileASCII(request.filename.data+"/map.pcd", filtered_map);
+
+    std::ofstream pose_ofs;
+    pose_ofs.open(request.filename.data+"/mapping_pose.txt");
+    if (!pose_ofs)
+    {
+      exit(1);
+    }
+    for(auto& pose:out_trajectory)
+    {
+        Eigen::Quaterniond q(pose.second.getRotation().w(),pose.second.getRotation().x(),pose.second.getRotation().y(),pose.second.getRotation().z());
+        Eigen::Matrix3d r;
+        r=q;
+        pose_ofs<<pose.first<<"\n";
+        pose_ofs << r(0,0)<<" "<<r(0,1)<<" "<<r(0,2)<<" "<<pose.second.getPosition()(0)
+                <<" "<<r(1,0)<<" "<<r(1,1)<<" "<<r(1,2)<<" "<<pose.second.getPosition()(1)
+                <<" "<<r(2,0)<<" "<<r(2,1)<<" "<<r(2,2)<<" "<<pose.second.getPosition()(2)<<"\n";
+    }
+    pose_ofs.close();
+
+    int id=0;
+    //遍历每一个有效的分割点云
+    for (auto& cloudFrame: laser_slam_worker_->cloudData)
+    {
+      //获取对应的点云
+      graph_laser::PointICloud* point_cloud=&cloudFrame.second.original_cloud;
+
+      std::stringstream ss;
+      ss<<std::setw(6)<<std::setfill('0')<<id;
+      std::string pcd_file_name=request.filename.data+"/pcd/"+ss.str()+".pcd";
+      pcl::io::savePCDFileASCII(pcd_file_name, *point_cloud);
+      id++;
+    }
+  }
+  catch (const std::runtime_error& e)
+  {
+    ROS_ERROR_STREAM("Unable to save: " << e.what());
+    return false;
+  }
+  return true;
+}
+
+void graphLaser::getParameters()
+{
+  // LaserMapper参数
+  const std::string ns = "/graphLaser";
+
+  nh_.getParam(ns + "/publish_world_to_odom",
+               params_.publish_world_to_odom);
+  nh_.getParam(ns + "/world_frame",
+               params_.world_frame);
+  nh_.getParam(ns + "/tf_publication_rate_hz",
+               params_.tf_publication_rate_hz);
+
+  //是否在闭环之后清理局部地图
+  nh_.getParam(ns + "/clear_local_map_after_loop_closure",
+               params_.clear_local_map_after_loop_closure);
+
+  // laser_slam worker参数
+  laser_slam_worker_params_ = graph_laser::getLaserSlamWorkerParams(nh_, ns);
+  laser_slam_worker_params_.world_frame = params_.world_frame;
+
+  //在线位姿优化的参数
+  params_.online_estimator_params = graph_laser::getOnlineEstimatorParams(nh_, ns);
+
+  //icp参数
+  nh_.getParam("icp_configuration_file",
+               params_.online_estimator_params.laser_track_params.icp_configuration_file);
+  nh_.getParam("icp_input_filters_file",
+               params_.online_estimator_params.laser_track_params.icp_input_filters_file);
+
+}

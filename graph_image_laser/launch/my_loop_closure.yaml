@@ -1,0 +1,205 @@
+﻿graphImageLaser: {
+  #世界坐标系
+  world_frame: "/map",
+  #是否在闭环之后清空局部地图
+  clear_local_map_after_loop_closure: true,
+
+  #是否发布世界坐标系到里程计坐标系的变换
+  publish_world_to_odom: true,
+  #tf发布频率
+  tf_publication_rate_hz: 10,
+
+  #laserSlam参数
+  LaserSlamWorker: {
+    #圆柱形滤波参数，即取半径为80m内的点
+    distance_to_consider_fixed: 80,
+    #在发布的时候是否分离远处的点
+    separate_distant_map: true,
+    #是否加入局部地图
+    create_filtered_map: true,
+    #每一个关键帧之间的距离
+    minimum_distance_to_add_pose: 1,
+    #栅格滤波的叶子大小
+    voxel_size_m: 0.1,
+    #栅格滤波器的参数
+    minimum_point_number_per_voxel: 1,
+
+    #是否使用里程计信息
+    use_odometry_information: true,
+
+    #里程计坐标系
+    odom_frame: "/odom",
+    #传感器坐标系或者称本体坐标系
+    sensor_frame: "/base_link",
+
+    #接收的点云topic
+    assembled_cloud_sub_topic: "/velodyne_points",
+    #发布的里程计topic
+    trajectory_pub_topic: "trajectory",
+    #发布的里程计topic
+    odometry_trajectory_pub_topic: "odometry_trajectory",
+    #全部地图topic
+    full_map_pub_topic: "full_map",
+    #局部地图topic
+    local_map_pub_topic: "local_map",
+    #距离地图topic
+    distant_map_pub_topic: "distant_map",
+
+    #是否发布
+    publish_local_map: true,
+    #是否发布距离外的地图
+    publish_distant_map: false,
+    #是否发布全部地图
+    publish_full_map: true,
+    #地图发布频率
+    map_publication_rate_hz: 3,
+  },
+
+  #分割匹配的参数
+  SegMatchWorker: {
+  #定位模式
+  localize: false,
+  #闭环模式
+  close_loops: true,
+
+  #两次分割匹配的位姿间距，即运动最小距离进行一次分割匹配，两次分割的间距相隔5m
+  distance_between_segmentations_m: 5.0,
+
+  #当前点云匹配的设置高度差，参考点云在当前点云distance_to_lower_target_cloud_for_viz_m下
+  #即将参考点云放在多高的地方
+  distance_to_lower_target_cloud_for_viz_m: 15.0,
+  #在定位模式下，第一次发生闭环是否对齐目标地图
+  align_target_map_on_first_loop_closure: false,
+
+  #随机滤波的参数，这个设为1.0则不进行随机滤波。设的越小，则滤除的越多
+  ratio_of_points_to_keep_when_publishing: 1.0,
+
+  #是否导出匹配
+  export_segments_and_matches: false,
+  #是否发布直接预测为滤波的匹配
+  publish_predicted_segment_matches: false,
+
+  line_scale_loop_closures: 5.0,
+  #发布匹配对时的线scale
+  line_scale_matches: 0.5,
+
+  #分割匹配的参数
+  SegMatch: {
+    #输入点云圆柱形滤波器，半径，最高最低
+    segmentation_radius_m: 60.0,
+    #这里相当于高度不限制
+    segmentation_height_above_m: 999.0,
+    segmentation_height_below_m: 999.0,
+
+    #是否边界滤波
+    filter_boundary_segments: true,
+    #边界滤波半径
+    boundary_radius_m: 999.0,
+    #是否重复滤波
+    filter_duplicate_segments: true,
+
+    #分割点云团的相近邻滤波参数,knn寻找最近分割点云团的距离阈值，2*2=4
+    centroid_distance_threshold_m: 2.0,
+    #匹配的两个点云团的最大时间差60
+    min_time_between_segment_for_matches_s: 60,
+    check_pose_lies_below_segments: false,
+
+    #分割的参数
+    Segmenters: {
+      #分割时使用的方法欧式聚类分割和
+      segmenter_type: "EuclideanSegmenter", #RegionGrowingSegmenter
+
+      #RegionGrowing聚类参数,区域生长法
+      #聚类最小最大点云个数
+      rg_min_cluster_size: 100,
+      rg_max_cluster_size: 50000,
+      #knn参数
+      rg_knn_for_normals: 100,
+      rg_knn_for_growing: 30,
+      rg_smoothness_threshold_deg: 4.0,
+      rg_curvature_threshold: 0.05,
+      rg_radius_for_normals: 0.5,
+
+      #欧式聚类参数
+      #欧式聚类的距离值，ec_tolerance设置小，则聚类多，设置大，则聚类少，类似knn
+      ec_tolerance: 0.3,
+      #每个点云的最大最小点个数
+      ec_max_cluster_size: 10000,
+      ec_min_cluster_size: 50
+    },
+
+    #描述子参数,描述子类型
+    Descriptors: {
+      descriptor_types: ["EigenvalueBased"], # "EnsembleShapeFunctions"
+    },
+
+    #分类器参数
+    Classifier: {
+     #阈值，随机森林个预测的匹配的概率需要大于这个阈值
+     threshold_to_accept_match: 0.7,
+     #knn的k数，找每个最近的200个
+     n_nearest_neighbours: 100,
+     #knn的特征维度7维
+     knn_feature_dim: 7,
+     #使用二步策略,线knn找n_nearest_neighbours特征维度最近的，再使用rf找到匹配值高于threshold_to_accept_match的
+     enable_two_stage_retrieval: true,
+     #使用两者特征值直接归一化筛选
+     apply_hard_threshold_on_feature_distance: false,
+     #使用两者特征值直接归一化筛选的阈值
+     feature_distance_threshold: 1,
+
+     #是否归一化特征值去做knn
+     normalize_eigen_for_knn: false,
+     #是否归一化去判断阈值
+     normalize_eigen_for_hard_threshold: true,
+     #每一维的特征值最大值
+     max_eigen_features_values: [2493.5, 186681.0, 188389.0, 0.3304, 188388.0, 1.0899, 0.9987]
+    },
+
+    #几何一致性参数GeometricConsistencyGrouping
+    GeometricConsistency: {
+      #设置几何一致性大小
+      resolution: 0.4,
+      #设置阈值
+      min_cluster_size: 4
+    }
+  },
+  },
+
+  #在线优化器参数
+  OnlineEstimator: {
+    #闭环噪声模型
+    loop_closure_noise_model: [0.0005, 0.0005, 0.0005, 0.00015, 0.00015, 0.00015],
+    #是否在闭环中使用优化
+    add_m_estimator_on_loop_closures: true,
+
+    #是否在闭环的使用icp
+    do_icp_step_on_loop_closures: true,
+    #闭环时使用icp时两帧取的submap半径
+    loop_closures_sub_maps_radius: 3,
+
+    #track线程
+    LaserTrack: {
+      #里程计噪声模型
+      odometry_noise_model: [0.5, 0.5, 0.5, 0.15, 0.15, 0.15],
+      #icp噪声模型
+      icp_noise_model: [0.05, 0.05, 0.05, 0.015, 0.015, 0.015],
+      #是否在里程计中使用优化
+      add_m_estimator_on_odom: false,
+      #是否在icp中使用优化,这个好像并没什么用
+      add_m_estimator_on_icp: true,
+
+      #是否使用icp因子
+      #引入ICP约束会引入漂移。
+      use_icp_factors: false,
+      nscan_to_match: 3,
+      #icp匹配时的用到的局部地图
+      nscan_in_sub_map: 5,
+      #是否保存icp结果
+      save_icp_results: false,
+      #是否重新设置先验位姿
+      force_priors: false
+    }
+  }
+}
+

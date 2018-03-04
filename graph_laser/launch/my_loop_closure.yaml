@@ -1,0 +1,104 @@
+﻿graphLaser: {
+  #世界坐标系
+  world_frame: "/map",
+  #是否在闭环之后清空局部地图
+  clear_local_map_after_loop_closure: true,
+
+  #是否发布世界坐标系到里程计坐标系的变换
+  publish_world_to_odom: true,
+  #tf发布频率
+  tf_publication_rate_hz: 10,
+  #视觉闭环检测阈值
+  alpha: 0.4,
+
+  #laserSlam参数
+  LaserSlamWorker: {
+    #圆柱形滤波参数，即取半径为80m内的点
+    distance_to_consider_fixed: 80,
+    #在发布的时候是否分离远处的点
+    separate_distant_map: true,
+    #是否加入局部地图
+    create_filtered_map: true,
+    #每一个关键帧之间的距离
+    minimum_distance_to_add_pose: 0.2,
+    #栅格滤波的叶子大小
+    voxel_size_m: 0.5,
+    #栅格滤波器的参数
+    minimum_point_number_per_voxel: 1,
+
+    #是否使用里程计信息
+    use_odometry_information: true,
+
+    #里程计坐标系
+    odom_frame: "/odom",
+    #传感器坐标系或者称本体坐标系
+    sensor_frame: "/base_link",
+
+    #接收的点云topic
+    assembled_cloud_sub_topic: "/velodyne_points",
+    #接收的图片topic
+    image_sub_topic: "/camera/left/image_color",
+    #接收的地面激光topic
+    ground_cloud_sub_topic: "/points_ground",
+    #发布的里程计topic
+    trajectory_pub_topic: "trajectory",
+    #发布的里程计topic
+    odometry_trajectory_pub_topic: "odometry_trajectory",
+    #全部地图topic
+    full_map_pub_topic: "full_map",
+    #局部地图topic
+    local_map_pub_topic: "local_map",
+    #距离地图topic
+    distant_map_pub_topic: "distant_map",
+    #地面地图topic
+    full_ground_map_pub_topic: "ground_map",
+
+    #是否发布
+    publish_local_map: true,
+    #是否发布距离外的地图
+    publish_distant_map: false,
+    #是否发布全部地图
+    publish_full_map: true,
+    #是否发布地面地图
+    publish_ground_map: false,
+    #地图发布频率
+    map_publication_rate_hz: 3,
+  },
+
+  #在线优化器参数
+  OnlineEstimator: {
+    #闭环噪声模型
+    loop_closure_noise_model: [0.0005, 0.0005, 0.0005, 0.00015, 0.00015, 0.00015],
+    #是否在闭环中使用优化
+    add_m_estimator_on_loop_closures: true,
+
+    #是否在闭环的使用icp
+    do_icp_step_on_loop_closures: true,
+    #闭环时使用icp时两帧取的submap半径
+    loop_closures_sub_maps_radius: 40,
+
+    #track线程
+    LaserTrack: {
+      #里程计噪声模型
+      odometry_noise_model: [0.5, 0.5, 0.5, 0.15, 0.15, 0.15],
+      #icp噪声模型
+      icp_noise_model: [0.05, 0.05, 0.05, 0.015, 0.015, 0.015],
+      #是否在里程计中使用优化
+      add_m_estimator_on_odom: false,
+      #是否在icp中使用优化
+      add_m_estimator_on_icp: true,
+
+      #是否使用icp因子
+      #引入ICP约束会引入漂移。
+      use_icp_factors: false,
+      nscan_to_match: 3,
+      #icp匹配时的用到的局部地图
+      nscan_in_sub_map: 5,
+      #是否保存icp结果
+      save_icp_results: false,
+      #是否重新设置先验位姿
+      force_priors: false
+    }
+  }
+}
+

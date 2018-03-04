@@ -1,0 +1,35 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+
+<launch>
+
+  <arg name="respawn_value" default="false" /> <!-- boolean: true, false -->
+
+  <!-- Bag file path -->
+  <arg name="bag_file" value="/home/ren/knowmeking/我的数据集/图像公开数据集/kitti/raw/2011_10_03_0027.bag"/>
+  <rosparam param="graphImageLaser/bag_file" subst_value="True">$(arg bag_file)</rosparam>
+
+  <!-- Rviz visualization config file path -->
+  <arg name="rviz_config_file" value="$(find graph_image_laser)/config/kitti/kitti_loop_closure.rviz"/>
+
+  <!-- ROS parameters -->
+  <rosparam>use_sim_time: true</rosparam>
+  <rosparam command="load" file="$(find graph_image_laser)/launch/kitti_loop_closure.yaml"/>
+
+  <!-- rviz node -->
+  <node name="visualizer" pkg="rviz" type="rviz" output="screen" respawn="$(arg respawn_value)" args="-d $(arg rviz_config_file)" />
+
+  <!-- load classifier -->
+  <arg name="classifier" value="$(find graph_image_laser)/config/kitti/random_forest_eigen_25trees.xml"/>
+  <rosparam param="/graphImageLaser/SegMatchWorker/SegMatch/Classifier/classifier_filename" subst_value="True">$(arg classifier)</rosparam>
+
+
+  <!-- laser_mapper node -->
+  <include file="$(find graph_image_laser)/launch/graph_laser.launch">
+    <arg name="icp_configuration_file" value="$(find graph_image_laser)/launch/icp_dynamic_outdoor.yaml"/>
+    <arg name="icp_input_filters_file" value="$(find graph_image_laser)/launch/input_filters_outdoor.yaml"/>
+  </include>
+
+    <!-- rosbag player node -->
+  <node name="player" pkg="rosbag" type="play" output="screen" args=" -r 1 -s 0 --clock --pause $(arg bag_file)"/>
+
+</launch>

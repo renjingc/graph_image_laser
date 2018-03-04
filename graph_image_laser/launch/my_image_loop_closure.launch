@@ -1,0 +1,79 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+
+<launch>
+  <param name="use_sim_time" value="false" />
+
+  <!-- Rviz visualization config file path -->
+  <arg name="rviz_config_file" value="$(find graph_image_laser)/config/kitti/kitti_image_loop_closure.rviz"/>
+
+  <!-- ROS parameters -->
+  <rosparam command="load" file="$(find graph_image_laser)/launch/my_image_loop_closure.yaml"/>
+
+  <!-- rviz node -->
+  <node name="visualizer" pkg="rviz" type="rviz" output="screen" args="-d $(arg rviz_config_file)" />
+
+  <arg name="config_path" default = "$(find graph_image_laser)/config/camera_config.yaml" />
+  <arg name="vins_path" default = "$(find graph_image_laser)/config/../" />
+
+<!--  <node name="feature_tracker" pkg="feature_tracker" type="feature_tracker" output="screen">
+    <param name="config_file" type="string" value="$(arg config_path)" />
+    <param name="vins_folder" type="string" value="$(arg vins_path)" />
+  </node>-->
+
+  <arg name="pattern_file" default = "/home/ren/catkin_ws/src/VINS-Mono/support_files/brief_pattern.yml" />
+  <arg name="voc_file" default = "/home/ren/catkin_ws/src/VINS-Mono/support_files/brief_k10L6.bin" />
+
+  <!-- laser_mapper node -->
+  <include file="$(find graph_image_laser)/launch/graph_image_laser.launch">
+    <arg name="icp_configuration_file" value="$(find graph_image_laser)/launch/icp_dynamic_outdoor.yaml"/>
+    <arg name="icp_input_filters_file" value="$(find graph_image_laser)/launch/input_filters_outdoor.yaml"/>
+    <param name="config_path" value="$(arg config_path)"/>
+    <param name="voc_file" value="$(arg voc_file)"/>
+    <param name="pattern_file" value="$(arg pattern_file)"/>
+  </include>
+
+  <node pkg="laser_imu_camera_sync" type="vlp_transform" name="vlp_transform" output="screen" />
+  <node pkg="tf" type="static_transform_publisher" name="link2_broadcaster" args="0 0 0 0 0 0 1 base_link velodyne 10" />
+  <node pkg="tf" type="static_transform_publisher" name="link1_broadcaster" args="0 0 0 0 0 0 1 base_link imu 10" />
+
+  <arg name="points_topic" default="/velodyne_points" />    <!--激光 topic -->
+  <arg name="odom_topic" default="/odom_pose" />    <!--odom topic -->
+  <arg name="imu_topic" default="/imu/data" />      <!--imu topic -->
+  <node pkg="lvins" type="scan2scan_imu_odom" name="scan2scan_imu_odom" output="screen">
+      <param name="points_topic" value="$(arg points_topic)" />
+      <param name="odom_topic" value="$(arg odom_topic)" />
+      <param name="imu_topic" value="$(arg imu_topic)" />
+  </node>
+
+    <arg name="point_topic" default="/velodyne_points" />
+    <arg name="remove_floor" default="true" />
+    <arg name="sensor_model" default="16" />
+    <arg name="sensor_height" default="1.45" />
+    <arg name="max_slope" default="5" /> <!--最大角度 越小，则地面要求越严格-->
+    <arg name="points_distance" default="0.05" />
+    <arg name="min_point" default="3" />
+    <arg name="min_intensity" default="1.0" />
+    <arg name="max_intensity" default="1.0" />
+    <arg name="clipping_thres" default="-0.5" /> <!-- -0.5 越小，则地面要求越严格 -->
+    <arg name="gap_thres" default="0.2" /> <!--距离设置，越小，则地面要求越严格 -->
+    <arg name="no_ground_point_topic" default="/points_no_ground" />
+    <arg name="ground_point_topic" default="/points_ground" />
+
+    <!-- rosrun lidar_tracker ground_filter -->
+    <node pkg="points_preprocessor" type="ground_filter" name="ground_filter"  output="screen">
+            <param name="point_topic" value="$(arg point_topic)" />
+            <param name="remove_floor" value="$(arg remove_floor)" />
+            <param name="sensor_model" value="$(arg sensor_model)" />
+            <param name="sensor_height" value="$(arg sensor_height)" />
+            <param name="max_slope" value="$(arg max_slope)" />
+            <param name="points_distance" value="$(arg points_distance)" />
+            <param name="min_point" value="$(arg min_point)" />
+            <param name="min_intensity" value="$(arg min_intensity)" />
+            <param name="max_intensity" value="$(arg max_intensity)" />
+            <param name="clipping_thres" value="$(arg clipping_thres)" />
+            <param name="gap_thres" value="$(arg gap_thres)" />
+            <param name="no_ground_point_topic" value="$(arg no_ground_point_topic)" />
+            <param name="ground_point_topic" value="$(arg ground_point_topic)" />
+    </node>
+
+</launch>
